@@ -38,6 +38,28 @@ async def setup_bot():
                 name="GTA V RP tournaments"
             )
         )
+        
+        # Sync application commands globally
+        try:
+            # Log all commands before syncing
+            all_commands = []
+            for cmd in bot.tree.get_commands():
+                all_commands.append(cmd.name)
+                logger.info(f"Command found: {cmd.name}")
+            
+            synced = await bot.tree.sync()
+            logger.info(f"Synced {len(synced)} commands globally: {', '.join([cmd.name for cmd in synced])}")
+        except Exception as e:
+            logger.error(f"Failed to sync commands: {e}")
+            
+        # Also sync to the current guilds
+        for guild in bot.guilds:
+            try:
+                synced = await bot.tree.sync(guild=discord.Object(id=guild.id))
+                logger.info(f"Synced {len(synced)} commands to guild {guild.id}: {', '.join([cmd.name for cmd in synced])}")
+            except Exception as e:
+                logger.error(f"Failed to sync commands to guild {guild.id}: {e}")
+
     
     # Load cogs (extensions)
     cogs = [
@@ -53,5 +75,10 @@ async def setup_bot():
             logger.info(f"Loaded extension: {cog}")
         except Exception as e:
             logger.error(f"Failed to load extension {cog}: {e}")
+    
+    # Register a test slash command directly in the bot
+    @bot.tree.command(name="test", description="Тестовая команда")
+    async def test_command(interaction: discord.Interaction):
+        await interaction.response.send_message("Тестовая команда работает!", ephemeral=True)
     
     return bot

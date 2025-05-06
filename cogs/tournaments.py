@@ -307,6 +307,7 @@ class Tournaments(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         create_tables()  # Initialize database tables
+        self.processed_interactions = set()  # Для отслеживания обработанных взаимодействий
         self.check_upcoming_tournaments.start()
         
     def cog_unload(self):
@@ -853,6 +854,16 @@ class Tournaments(commands.Cog):
         max_participants: int,
         entry_fee: Optional[int] = 0
     ):
+        # Проверяем, не обрабатывали ли мы уже это взаимодействие
+        interaction_id = str(interaction.id)
+        if interaction_id in self.processed_interactions:
+            logger.warning(f"Skipping duplicate interaction {interaction_id}")
+            return
+            
+        # Помечаем взаимодействие как обработанное
+        self.processed_interactions.add(interaction_id)
+        logger.info(f"Processing private tournament creation, interaction ID: {interaction_id}")
+        
         try:
             # Parse date
             try:
@@ -993,6 +1004,16 @@ class Tournaments(commands.Cog):
         tournament_date: str,
         entry_fee: Optional[int] = 0
     ):
+        # Проверяем, не обрабатывали ли мы уже это взаимодействие
+        interaction_id = str(interaction.id)
+        if interaction_id in self.processed_interactions:
+            logger.warning(f"Skipping duplicate interaction {interaction_id}")
+            return
+            
+        # Помечаем взаимодействие как обработанное
+        self.processed_interactions.add(interaction_id)
+        logger.info(f"Processing public tournament creation, interaction ID: {interaction_id}")
+        
         try:
             # Parse date
             try:
@@ -1124,6 +1145,15 @@ class Tournaments(commands.Cog):
         interaction: discord.Interaction,
         team_name: str
     ):
+        # Проверяем, не обрабатывали ли мы уже это взаимодействие
+        interaction_id = str(interaction.id)
+        if interaction_id in self.processed_interactions:
+            logger.warning(f"Skipping duplicate interaction {interaction_id}")
+            return
+            
+        # Помечаем взаимодействие как обработанное
+        self.processed_interactions.add(interaction_id)
+        logger.info(f"Processing tournament registration, interaction ID: {interaction_id}")
         # Get database connection
         db = get_db()
         cursor = db.cursor()

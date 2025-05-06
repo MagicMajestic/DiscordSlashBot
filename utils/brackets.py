@@ -138,6 +138,7 @@ def generate_tournament_bracket(tournament_id):
         matches = cursor.fetchall()
         
         if not matches:
+            logger.warning(f"No matches found for tournament {tournament_id}")
             return (False, "Для этого турнира еще не создано матчей")
         
         # Create the bracket embed

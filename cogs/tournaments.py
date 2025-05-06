@@ -378,11 +378,28 @@ class Tournaments(commands.Cog):
                 await channel.send(content=f"**ВНИМАНИЕ! ТУРНИР СКОРО НАЧНЕТСЯ!** {participant_mentions}", embed=embed)
         
         # 2. Get tournaments that should have started but status is still 'approved'
+        # Сначала проверим, есть ли турниры, которые должны начаться
+        cursor.execute(
+            """
+            SELECT id, name, tournament_date
+            FROM tournaments 
+            WHERE tournament_date <= ?
+            AND status = 'approved'
+            AND started = 0
+            """,
+            (now.strftime('%Y-%m-%d %H:%M:%S'),)
+        )
+        
+        pending_tournaments = cursor.fetchall()
+        
+        logger.info(f"Found {len(pending_tournaments)} tournaments that should start: {pending_tournaments}")
+        
+        # Теперь получим полную информацию с данными создателя
         cursor.execute(
             """
             SELECT t.*, u.username as creator_name 
             FROM tournaments t
-            JOIN players u ON t.creator_id = u.user_id
+            LEFT JOIN players u ON t.creator_id = u.user_id
             WHERE t.tournament_date <= ?
             AND t.status = 'approved'
             AND t.started = 0
@@ -391,6 +408,7 @@ class Tournaments(commands.Cog):
         )
         
         started_tournaments = cursor.fetchall()
+        logger.info(f"After JOIN with players: {len(started_tournaments)} tournaments")
         
         for tournament in started_tournaments:
             logger.info(f"Starting tournament {tournament['id']} - {tournament['name']}")
@@ -402,45 +420,61 @@ class Tournaments(commands.Cog):
                     (tournament['id'],)
                 )
                 
-                # Get participants for private tournament
+                # Выберем канал для коммуникации в зависимости от типа турнира
                 if tournament['type'] == 'private':
+                    channel_id = PRIVATE_TOURNAMENTS_CHANNEL
+                else:
+                    channel_id = PUBLIC_TOURNAMENTS_CHANNEL
+                                
+                # Получаем всех участников турнира
+                cursor.execute(
+                    "SELECT user_id FROM tournament_participants WHERE tournament_id = ?",
+                    (tournament['id'],)
+                )
+                
+                participants = cursor.fetchall()
+                
+                # Need at least 2 participants for a tournament
+                if len(participants) < 2:
+                    logger.warning(f"Tournament {tournament['id']} has less than 2 participants, cancelling")
+                    
+                    # Отменяем турнир из-за недостаточного количества участников
                     cursor.execute(
-                        "SELECT user_id FROM tournament_participants WHERE tournament_id = ?",
-                        (tournament['id'],)
+                        "UPDATE tournaments SET status = 'cancelled', cancellation_reason = ? WHERE id = ?",
+                        ("Недостаточно участников для начала турнира", tournament['id'])
                     )
                     
-                    participants = cursor.fetchall()
+                    # Фиксируем транзакцию
+                    db.commit()
                     
-                    # Need at least 2 participants for a tournament
-                    if len(participants) < 2:
-                        logger.warning(f"Tournament {tournament['id']} has less than 2 participants, cancelling")
-                        
-                        # Отменяем турнир из-за недостаточного количества участников
-                        cursor.execute(
-                            "UPDATE tournaments SET status = 'cancelled', cancellation_reason = ? WHERE id = ?",
-                            ("Недостаточно участников для начала турнира", tournament['id'])
+                    # Отправляем уведомление об отмене турнира
+                    channel = self.bot.get_channel(channel_id)
+                    
+                    if channel:
+                        embed = discord.Embed(
+                            title=f"❌ Турнир отменен: {tournament['name']}",
+                            description=f"Турнир был автоматически отменен из-за недостаточного количества участников.",
+                            color=0xE74C3C  # Red
                         )
                         
-                        # Отправляем уведомление об отмене турнира
-                        channel_id = PRIVATE_TOURNAMENTS_CHANNEL
-                        channel = self.bot.get_channel(channel_id)
+                        embed.add_field(
+                            name="Статистика участников", 
+                            value=f"Зарегистрировано: {len(participants)}\nМинимум требуется: 2", 
+                            inline=False
+                        )
                         
-                        if channel:
-                            embed = discord.Embed(
-                                title=f"❌ Турнир отменен: {tournament['name']}",
-                                description=f"Турнир был автоматически отменен из-за недостаточного количества участников.",
-                                color=0xE74C3C  # Red
-                            )
+                        # Упоминаем всех зарегистрированных участников и создателя
+                        mentions = ' '.join([f"<@{p['user_id']}>" for p in participants])
+                        if tournament.get('creator_id'):
+                            mentions += f" <@{tournament['creator_id']}>"
                             
-                            # Упоминаем всех зарегистрированных участников и создателя
-                            mentions = ' '.join([f"<@{p['user_id']}>" for p in participants])
-                            if tournament.get('creator_id'):
-                                mentions += f" <@{tournament['creator_id']}>"
-                                
-                            await channel.send(mentions, embed=embed)
-                            
-                        # Пропускаем дальнейшую обработку этого турнира
-                        continue
+                        await channel.send(content=f"**ВНИМАНИЕ! ТУРНИР ОТМЕНЕН!** {mentions}", embed=embed)
+                        
+                    # Пропускаем дальнейшую обработку этого турнира
+                    continue
+
+                # Начинаем создание матчей в зависимости от типа турнира
+                if tournament['type'] == 'private':
                     
                     # Create initial matches for the first round - shuffle participants for random matchmaking
                     import random
@@ -532,8 +566,23 @@ class Tournaments(commands.Cog):
                             # In the future, implement proper bye handling
                             logger.info(f"Team {team_ids[i]} gets a bye in first round") 
                 
-                # Generate and send the tournament bracket
+                # Вначале убедимся, что есть матчи для турнира
+                # Проверим, сколько матчей создалось
+                cursor.execute(
+                    "SELECT COUNT(*) as count FROM tournament_matches WHERE tournament_id = ?",
+                    (tournament['id'],)
+                )
+                match_count = cursor.fetchone()['count']
+                logger.info(f"Created {match_count} matches for tournament {tournament['id']}")
+                
+                # Зафиксируем транзакцию, чтобы матчи стали доступны для следующего запроса
+                db.commit()
+                
+                # Генерируем турнирную сетку
                 success, bracket = generate_tournament_bracket(tournament['id'])
+                
+                # Логируем успешное создание турнирной сетки
+                logger.info(f"Tournament {tournament['id']} - {tournament['name']} bracket generation: {success}")
                 
                 if success:
                     # Send bracket to the appropriate channel
@@ -543,60 +592,76 @@ class Tournaments(commands.Cog):
                         channel_id = PUBLIC_TOURNAMENTS_CHANNEL
                         
                     channel = self.bot.get_channel(channel_id)
+                    
+                    # Получаем тип матчей (BO1, BO3 и т.д.)
+                    match_type = tournament.get('match_type', 'BO1')
+                    
+                    # Логируем настройки турнира и его сообщение о запуске
+                    tournament_start_message = f"""
+                    🎮 Турнир начался: {tournament['name']}
+                    Турнирная сетка сформирована. Первые матчи созданы!
+                    
+                    Формат матчей: {match_type}
+                    Тип турнира: {tournament['type']}
+                    """
+                    
+                    logger.info(tournament_start_message)
+                    
+                    # Get participants to mention
+                    cursor.execute(
+                        "SELECT user_id FROM tournament_participants WHERE tournament_id = ?",
+                        (tournament['id'],)
+                    )
+                    
+                    participants = cursor.fetchall()
+                    mentions = ' '.join([f"<@{p['user_id']}>" for p in participants])
+                    
+                    # Логируем участников
+                    logger.info(f"Tournament {tournament['id']} participants: {participants}")
+                    
+                    # Создаем эмбед для сообщения о начале турнира
+                    tournament_start_embed = discord.Embed(
+                        title=f"🎮 Турнир начался: {tournament['name']}",
+                        description=f"Турнирная сетка сформирована. Первые матчи созданы!",
+                        color=0x2ECC71  # Green
+                    )
+                    
+                    # Добавляем информацию о типе матчей (BO1, BO3 и т.д.)
+                    if match_type == 'BO1':
+                        match_desc = "Матчи проводятся до 1 победы"
+                    elif match_type == 'BO3':
+                        match_desc = "Матчи проводятся до 2 побед"
+                    elif match_type == 'BO5':
+                        match_desc = "Матчи проводятся до 3 побед"
+                    elif match_type == 'BO7':
+                        match_desc = "Матчи проводятся до 4 побед"
+                    else:
+                        match_desc = "Одиночные матчи"
+                    
+                    tournament_start_embed.add_field(
+                        name="Формат матчей", 
+                        value=f"{match_type}: {match_desc}", 
+                        inline=False
+                    )
+                    
+                    # Добавляем прямое упоминание всех участников
+                    if participants:
+                        tournament_start_embed.add_field(
+                            name="Участники", 
+                            value=mentions if len(mentions) <= 1024 else "Слишком много участников для отображения", 
+                            inline=False
+                        )
+                    
+                    # Show where to find match ID and other info
+                    tournament_start_embed.add_field(
+                        name="Как найти свой матч?", 
+                        value="Посмотрите свой ID в турнирной сетке ниже. Используйте этот ID для отправки результатов через команду `/tournament-set-result`.", 
+                        inline=False
+                    )
+                    
+                    tournament_start_embed.set_footer(text=f"Турнир ID: {tournament['id']}")
+                    
                     if channel:
-                        # Get participants to mention
-                        cursor.execute(
-                            "SELECT user_id FROM tournament_participants WHERE tournament_id = ?",
-                            (tournament['id'],)
-                        )
-                        
-                        participants = cursor.fetchall()
-                        mentions = ' '.join([f"<@{p['user_id']}>" for p in participants])
-                        
-                        # Получаем тип матчей (BO1, BO3 и т.д.)
-                        match_type = tournament.get('match_type', 'BO1')
-                        
-                        tournament_start_embed = discord.Embed(
-                            title=f"🎮 Турнир начался: {tournament['name']}",
-                            description=f"Турнирная сетка сформирована. Первые матчи созданы!",
-                            color=0x2ECC71  # Green
-                        )
-                        
-                        # Добавляем информацию о типе матчей (BO1, BO3 и т.д.)
-                        if match_type == 'BO1':
-                            match_desc = "Матчи проводятся до 1 победы"
-                        elif match_type == 'BO3':
-                            match_desc = "Матчи проводятся до 2 побед"
-                        elif match_type == 'BO5':
-                            match_desc = "Матчи проводятся до 3 побед"
-                        elif match_type == 'BO7':
-                            match_desc = "Матчи проводятся до 4 побед"
-                        else:
-                            match_desc = "Одиночные матчи"
-                        
-                        tournament_start_embed.add_field(
-                            name="Формат матчей", 
-                            value=f"{match_type}: {match_desc}", 
-                            inline=False
-                        )
-                        
-                        # Добавляем прямое упоминание всех участников
-                        if participants:
-                            tournament_start_embed.add_field(
-                                name="Участники", 
-                                value=mentions if len(mentions) <= 1024 else "Слишком много участников для отображения", 
-                                inline=False
-                            )
-                        
-                        # Show where to find match ID and other info
-                        tournament_start_embed.add_field(
-                            name="Как найти свой матч?", 
-                            value="Посмотрите свой ID в турнирной сетке ниже. Используйте этот ID для отправки результатов через команду `/tournament-set-result`.", 
-                            inline=False
-                        )
-                        
-                        tournament_start_embed.set_footer(text=f"Турнир ID: {tournament['id']}")
-                        
                         # Отправляем уведомление о начале турнира
                         try:
                             await channel.send(
@@ -611,8 +676,15 @@ class Tournaments(commands.Cog):
                                     f"🏆 **ТУРНИР НАЧАЛСЯ!** Следите за результатами.", 
                                     embeds=[tournament_start_embed, bracket]
                                 )
+                            
+                            logger.info(f"Successfully sent tournament start notification and bracket for tournament {tournament['id']}")
                         except Exception as e:
                             logger.error(f"Error sending tournament start notification: {e}")
+                    else:
+                        # Логируем, что не удалось найти канал, но иначе всё работает
+                        logger.warning(f"Cannot find channel {channel_id} to send tournament start notification")
+                        logger.info(f"Would have sent tournament start notification for {tournament['name']} (ID: {tournament['id']})")
+                        logger.info(f"Tournament bracket would contain {len(participants)} participants")
                     
                         
             except Exception as e:

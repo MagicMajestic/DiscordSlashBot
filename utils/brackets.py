@@ -4,7 +4,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def create_tournament_bracket_embed(tournament_id, tournament_name, matches, round_name=None):
+def create_tournament_bracket_embed(tournament_id, tournament_name, matches, match_type='BO1', round_name=None):
     """
     Create an embed with a textual representation of a tournament bracket.
     
@@ -12,6 +12,7 @@ def create_tournament_bracket_embed(tournament_id, tournament_name, matches, rou
         tournament_id: ID of the tournament
         tournament_name: Name of the tournament
         matches: List of match dictionaries with match data
+        match_type: Type of matches (BO1, BO3, BO5, BO7)
         round_name: Name of the specific round (optional)
         
     Returns:
@@ -36,7 +37,7 @@ def create_tournament_bracket_embed(tournament_id, tournament_name, matches, rou
     # Initialize the embed
     embed = discord.Embed(
         title=f"🏆 Турнирная сетка: {tournament_name}",
-        description=f"ID турнира: #{tournament_id}" + (f" | {round_name}" if round_name else ""),
+        description=f"ID турнира: #{tournament_id} | Формат: {match_type}" + (f" | {round_name}" if round_name else ""),
         color=0xF1C40F  # Gold
     )
     
@@ -132,7 +133,8 @@ def generate_tournament_bracket(tournament_id):
         embed = create_tournament_bracket_embed(
             tournament_id, 
             tournament['name'],
-            matches
+            matches,
+            tournament.get('match_type', 'BO1')
         )
         
         return (True, embed)

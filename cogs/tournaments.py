@@ -575,6 +575,7 @@ class Tournaments(commands.Cog):
     @app_commands.describe(
         name="Название турнира",
         weapon_type="Тип оружия",
+        match_type="Тип матчей: BO1 (до 1 победы), BO3 (до 2 побед), BO5 (до 3 побед), BO7 (до 4 побед)",
         entry_fee="Вступительный взнос (опционально)",
         tournament_date="Дата и время проведения (ДД.ММ.ГГГГ ЧЧ:ММ)",
         max_participants="Максимальное количество участников"
@@ -584,6 +585,7 @@ class Tournaments(commands.Cog):
         interaction: discord.Interaction, 
         name: str, 
         weapon_type: str, 
+        match_type: str,
         tournament_date: str,
         max_participants: int,
         entry_fee: Optional[int] = 0
@@ -625,12 +627,21 @@ class Tournaments(commands.Cog):
             db = get_db()
             cursor = db.cursor()
             
+            # Проверка типа матча
+            valid_types = ["BO1", "BO3", "BO5", "BO7"]
+            if match_type.upper() not in valid_types:
+                await interaction.response.send_message(
+                    f"Неверный тип матчей. Поддерживаемые типы: {', '.join(valid_types)}",
+                    ephemeral=True
+                )
+                return
+            
             # Create tournament in the database
             cursor.execute(
                 """
                 INSERT INTO tournaments 
-                (name, type, weapon_type, entry_fee, tournament_date, max_participants, creator_id, status, creation_date) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (name, type, weapon_type, entry_fee, tournament_date, max_participants, creator_id, status, creation_date, match_type) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     name, 
@@ -641,7 +652,8 @@ class Tournaments(commands.Cog):
                     max_participants,
                     interaction.user.id,
                     'pending',
-                    datetime.datetime.now()
+                    datetime.datetime.now(),
+                    match_type.upper()
                 )
             )
             
@@ -664,6 +676,7 @@ class Tournaments(commands.Cog):
             
             embed.add_field(name="Название", value=name, inline=True)
             embed.add_field(name="Тип оружия", value=weapon_type, inline=True)
+            embed.add_field(name="Тип матчей", value=match_type.upper(), inline=True)
             embed.add_field(name="Дата", value=tournament_date, inline=True)
             embed.add_field(name="Макс. участников", value=str(max_participants), inline=True)
             embed.add_field(name="Вступительный взнос", value=f"{entry_fee}$" if entry_fee > 0 else "Нет", inline=True)
@@ -702,6 +715,7 @@ class Tournaments(commands.Cog):
     @app_commands.describe(
         name="Название турнира",
         rules="Условия и правила турнира",
+        match_type="Тип матчей: BO1 (до 1 победы), BO3 (до 2 побед), BO5 (до 3 побед), BO7 (до 4 побед)",
         participants_per_team="Количество участников от каждой стороны",
         tournament_date="Дата и время проведения (ДД.ММ.ГГГГ ЧЧ:ММ)",
         entry_fee="Вступительный взнос (опционально)"
@@ -711,6 +725,7 @@ class Tournaments(commands.Cog):
         interaction: discord.Interaction, 
         name: str, 
         rules: str,
+        match_type: str,
         participants_per_team: int,
         tournament_date: str,
         entry_fee: Optional[int] = 0
@@ -752,12 +767,21 @@ class Tournaments(commands.Cog):
             db = get_db()
             cursor = db.cursor()
             
+            # Валидация типа матча
+            valid_types = ["BO1", "BO3", "BO5", "BO7"]
+            if match_type.upper() not in valid_types:
+                await interaction.response.send_message(
+                    f"Неверный тип матчей. Поддерживаемые типы: {', '.join(valid_types)}",
+                    ephemeral=True
+                )
+                return
+
             # Create tournament in the database - use max_participants as participants_per_team * 2 for now
             cursor.execute(
                 """
                 INSERT INTO tournaments 
-                (name, type, rules, entry_fee, tournament_date, max_participants, participants_per_team, creator_id, status, creation_date) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (name, type, rules, entry_fee, tournament_date, max_participants, participants_per_team, creator_id, status, creation_date, match_type) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     name, 
@@ -769,7 +793,8 @@ class Tournaments(commands.Cog):
                     participants_per_team,
                     interaction.user.id,
                     'pending',
-                    datetime.datetime.now()
+                    datetime.datetime.now(),
+                    match_type.upper()
                 )
             )
             
@@ -792,6 +817,7 @@ class Tournaments(commands.Cog):
             
             embed.add_field(name="Название", value=name, inline=True)
             embed.add_field(name="Дата", value=tournament_date, inline=True)
+            embed.add_field(name="Тип матчей", value=match_type.upper(), inline=True)
             embed.add_field(name="Участников от стороны", value=str(participants_per_team), inline=True)
             embed.add_field(name="Вступительный взнос", value=f"{entry_fee}$" if entry_fee > 0 else "Нет", inline=True)
             embed.add_field(name="Правила", value=rules, inline=False)
@@ -1088,48 +1114,6 @@ class Tournaments(commands.Cog):
             db.rollback()
             await interaction.followup.send(f"Произошла ошибка при регистрации команды: {e}", ephemeral=True)
 
-    @app_commands.command(
-        name="tournament-type",
-        description="Установить тип турнира (BO1, BO3, BO5 и т.д.)"
-    )
-    @app_commands.describe(
-        tournament_id="ID турнира",
-        match_type="Тип матчей: BO1 (до 1 победы), BO3 (до 2 побед), BO5 (до 3 побед) и т.д."
-    )
-    @app_commands.check(is_tournament_manager)
-    async def tournament_type(self, interaction: discord.Interaction, tournament_id: int, match_type: str):
-        await interaction.response.defer(ephemeral=True)
-        
-        valid_types = ["BO1", "BO3", "BO5", "BO7"]
-        if match_type.upper() not in valid_types:
-            await interaction.followup.send(
-                f"Неверный тип матчей. Поддерживаемые типы: {', '.join(valid_types)}",
-                ephemeral=True
-            )
-            return
-        
-        db = get_db()
-        cursor = db.cursor()
-        
-        # Добавим поле match_type в таблицу tournaments, если его еще нет
-        cursor.execute("PRAGMA table_info(tournaments)")
-        columns = [column[1] for column in cursor.fetchall()]
-        
-        if "match_type" not in columns:
-            cursor.execute("ALTER TABLE tournaments ADD COLUMN match_type TEXT DEFAULT 'BO1'")
-        
-        # Обновляем тип матчей для турнира
-        cursor.execute(
-            "UPDATE tournaments SET match_type = ? WHERE id = ?",
-            (match_type.upper(), tournament_id)
-        )
-        
-        db.commit()
-        
-        await interaction.followup.send(
-            f"✅ Тип матчей для турнира #{tournament_id} установлен как {match_type.upper()}",
-            ephemeral=False
-        )
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Tournaments(bot))

@@ -329,7 +329,9 @@ class Tournaments(commands.Cog):
         tournament_10000 = cursor.fetchone()
         if tournament_10000:
             logger.info(f"Tournament 10000 status: {tournament_10000}")
-
+        
+        # 0. Проверка одобренных турниров на недостаточное количество участников
+        await self.check_approved_tournaments_participants()
         
         # 1. Get tournaments starting in the next 15 minutes (for notifications)
         notification_threshold = now + datetime.timedelta(minutes=15)
@@ -411,7 +413,33 @@ class Tournaments(commands.Cog):
                     
                     # Need at least 2 participants for a tournament
                     if len(participants) < 2:
-                        logger.warning(f"Tournament {tournament['id']} has less than 2 participants, skipping bracket generation")
+                        logger.warning(f"Tournament {tournament['id']} has less than 2 participants, cancelling")
+                        
+                        # Отменяем турнир из-за недостаточного количества участников
+                        cursor.execute(
+                            "UPDATE tournaments SET status = 'cancelled', cancellation_reason = ? WHERE id = ?",
+                            ("Недостаточно участников для начала турнира", tournament['id'])
+                        )
+                        
+                        # Отправляем уведомление об отмене турнира
+                        channel_id = PRIVATE_TOURNAMENTS_CHANNEL
+                        channel = self.bot.get_channel(channel_id)
+                        
+                        if channel:
+                            embed = discord.Embed(
+                                title=f"❌ Турнир отменен: {tournament['name']}",
+                                description=f"Турнир был автоматически отменен из-за недостаточного количества участников.",
+                                color=0xE74C3C  # Red
+                            )
+                            
+                            # Упоминаем всех зарегистрированных участников и создателя
+                            mentions = ' '.join([f"<@{p['user_id']}>" for p in participants])
+                            if tournament.get('creator_id'):
+                                mentions += f" <@{tournament['creator_id']}>"
+                                
+                            await channel.send(mentions, embed=embed)
+                            
+                        # Пропускаем дальнейшую обработку этого турнира
                         continue
                     
                     # Create initial matches for the first round - shuffle participants for random matchmaking
@@ -450,7 +478,33 @@ class Tournaments(commands.Cog):
                     
                     # Need at least 2 teams for a tournament
                     if len(teams) < 2:
-                        logger.warning(f"Tournament {tournament['id']} has less than 2 teams, skipping bracket generation")
+                        logger.warning(f"Tournament {tournament['id']} has less than 2 teams, cancelling")
+                        
+                        # Отменяем турнир из-за недостаточного количества команд
+                        cursor.execute(
+                            "UPDATE tournaments SET status = 'cancelled', cancellation_reason = ? WHERE id = ?",
+                            ("Недостаточно команд для начала турнира", tournament['id'])
+                        )
+                        
+                        # Отправляем уведомление об отмене турнира
+                        channel_id = PUBLIC_TOURNAMENTS_CHANNEL
+                        channel = self.bot.get_channel(channel_id)
+                        
+                        if channel:
+                            embed = discord.Embed(
+                                title=f"❌ Турнир отменен: {tournament['name']}",
+                                description=f"Турнир был автоматически отменен из-за недостаточного количества команд.",
+                                color=0xE74C3C  # Red
+                            )
+                            
+                            # Уведомляем о проблеме и упоминаем создателя
+                            mentions = ""
+                            if tournament.get('creator_id'):
+                                mentions = f"<@{tournament['creator_id']}>"
+                                
+                            await channel.send(mentions, embed=embed)
+                            
+                        # Пропускаем дальнейшую обработку этого турнира
                         continue
                     
                     # Create initial matches for the first round - shuffle teams for random matchmaking
@@ -526,6 +580,14 @@ class Tournaments(commands.Cog):
                             inline=False
                         )
                         
+                        # Добавляем прямое упоминание всех участников
+                        if participants:
+                            tournament_start_embed.add_field(
+                                name="Участники", 
+                                value=mentions if len(mentions) <= 1024 else "Слишком много участников для отображения", 
+                                inline=False
+                            )
+                        
                         # Show where to find match ID and other info
                         tournament_start_embed.add_field(
                             name="Как найти свой матч?", 
@@ -564,9 +626,138 @@ class Tournaments(commands.Cog):
         
         db.commit()
     
+    async def check_approved_tournaments_participants(self):
+        """Проверка одобренных турниров на недостаточное количество участников."""
+        db = get_db()
+        cursor = db.cursor()
+        
+        # Получаем все одобренные турниры
+        cursor.execute(
+            """
+            SELECT t.*, u.username as creator_name 
+            FROM tournaments t
+            JOIN players u ON t.creator_id = u.user_id
+            WHERE t.status = 'approved'
+            AND t.started = 0
+            """
+        )
+        
+        approved_tournaments = cursor.fetchall()
+        
+        for tournament in approved_tournaments:
+            logger.info(f"Checking participants for tournament {tournament['id']} - {tournament['name']}")
+            
+            # Проверяем достаточное ли количество участников
+            if tournament['type'] == 'private':
+                # Для индивидуальных турниров
+                cursor.execute(
+                    "SELECT COUNT(*) as count FROM tournament_participants WHERE tournament_id = ?",
+                    (tournament['id'],)
+                )
+                
+                count = cursor.fetchone()['count']
+                
+                # Нужно минимум 2 участника
+                if count < 2:
+                    deadline = datetime.datetime.strptime(tournament['tournament_date'], "%Y-%m-%d %H:%M:%S") - datetime.timedelta(hours=1)
+                    now = datetime.datetime.now()
+                    
+                    # Если осталось меньше часа, отменяем турнир
+                    if now >= deadline:
+                        logger.warning(f"Tournament {tournament['id']} has less than 2 participants and less than 1 hour left, cancelling")
+                        
+                        # Отменяем турнир из-за недостаточного количества участников
+                        cursor.execute(
+                            "UPDATE tournaments SET status = 'cancelled', cancellation_reason = ? WHERE id = ?",
+                            ("Недостаточно участников для проведения турнира", tournament['id'])
+                        )
+                        
+                        # Получаем список участников для уведомления
+                        cursor.execute(
+                            "SELECT user_id FROM tournament_participants WHERE tournament_id = ?",
+                            (tournament['id'],)
+                        )
+                        
+                        participants = cursor.fetchall()
+                        
+                        # Отправляем уведомление об отмене турнира
+                        channel_id = PRIVATE_TOURNAMENTS_CHANNEL
+                        channel = self.bot.get_channel(channel_id)
+                        
+                        if channel:
+                            embed = discord.Embed(
+                                title=f"❌ Турнир отменен: {tournament['name']}",
+                                description=f"Турнир был автоматически отменен из-за недостаточного количества участников.",
+                                color=0xE74C3C  # Red
+                            )
+                            
+                            embed.add_field(name="Организатор", value=f"<@{tournament['creator_id']}>", inline=True)
+                            embed.add_field(name="Минимальное количество участников", value="2", inline=True)
+                            embed.add_field(name="Зарегистрировано", value=str(count), inline=True)
+                            
+                            # Упоминаем всех зарегистрированных участников и создателя
+                            mentions = ' '.join([f"<@{p['user_id']}>" for p in participants])
+                            if tournament.get('creator_id'):
+                                mentions += f" <@{tournament['creator_id']}>"
+                                
+                            await channel.send(mentions, embed=embed)
+            
+            else:
+                # Для командных турниров
+                cursor.execute(
+                    "SELECT COUNT(*) as count FROM tournament_teams WHERE tournament_id = ?",
+                    (tournament['id'],)
+                )
+                
+                count = cursor.fetchone()['count']
+                
+                # Нужно минимум 2 команды
+                if count < 2:
+                    deadline = datetime.datetime.strptime(tournament['tournament_date'], "%Y-%m-%d %H:%M:%S") - datetime.timedelta(hours=1)
+                    now = datetime.datetime.now()
+                    
+                    # Если осталось меньше часа, отменяем турнир
+                    if now >= deadline:
+                        logger.warning(f"Tournament {tournament['id']} has less than 2 teams and less than 1 hour left, cancelling")
+                        
+                        # Отменяем турнир из-за недостаточного количества команд
+                        cursor.execute(
+                            "UPDATE tournaments SET status = 'cancelled', cancellation_reason = ? WHERE id = ?",
+                            ("Недостаточно команд для проведения турнира", tournament['id'])
+                        )
+                        
+                        # Отправляем уведомление об отмене турнира
+                        channel_id = PUBLIC_TOURNAMENTS_CHANNEL
+                        channel = self.bot.get_channel(channel_id)
+                        
+                        if channel:
+                            embed = discord.Embed(
+                                title=f"❌ Турнир отменен: {tournament['name']}",
+                                description=f"Турнир был автоматически отменен из-за недостаточного количества команд.",
+                                color=0xE74C3C  # Red
+                            )
+                            
+                            embed.add_field(name="Организатор", value=f"<@{tournament['creator_id']}>", inline=True)
+                            embed.add_field(name="Минимальное количество команд", value="2", inline=True)
+                            embed.add_field(name="Зарегистрировано", value=str(count), inline=True)
+                            
+                            # Уведомляем о проблеме и упоминаем создателя
+                            mentions = ""
+                            if tournament.get('creator_id'):
+                                mentions = f"<@{tournament['creator_id']}>"
+                                
+                            await channel.send(mentions, embed=embed)
+        
+        # Сохраняем изменения
+        db.commit()
+    
     @check_upcoming_tournaments.before_loop
     async def before_check_upcoming_tournaments(self):
+        # Wait until the bot is ready
         await self.bot.wait_until_ready()
+        
+        # Логируем, что задача запущена
+        logger.info("check_upcoming_tournaments task is initialized and will be running periodically")
     
     @app_commands.command(
         name="tournament-create-private",

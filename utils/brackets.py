@@ -65,20 +65,27 @@ def create_tournament_bracket_embed(tournament_id, tournament_name, matches, mat
                 
                 # Add scores if match is completed
                 if match.get('completed', 0) == 1:
-                    score1 = match.get('score_team1', 0)
-                    score2 = match.get('score_team2', 0)
+                    score1 = match.get('team1_score', 0)
+                    score2 = match.get('team2_score', 0)
                     matches_text += f"Матч #{match_id}: {team1} **{score1}** - **{score2}** {team2}\n"
                 else:
                     matches_text += f"Матч #{match_id}: {team1} vs {team2}\n"
             else:
                 # Individual tournament
-                player1 = f"<@{match.get('player1_id', '?')}>" if match.get('player1_id') else '?'
-                player2 = f"<@{match.get('player2_id', '?')}>" if match.get('player2_id') else '?'
+                # Используем ID для тегов и имя как запасной вариант
+                player1_id = match.get('player1_id')
+                player2_id = match.get('player2_id')
+                player1_name = match.get('player1_name', '?')
+                player2_name = match.get('player2_name', '?')
+                
+                # Форматируем для отображения - предпочитаем теги, но используем имена если теги не работают
+                player1 = f"<@{player1_id}>" if player1_id else player1_name if player1_name != '?' else '?'
+                player2 = f"<@{player2_id}>" if player2_id else player2_name if player2_name != '?' else '?'
                 
                 # Add scores if match is completed
                 if match.get('completed', 0) == 1:
-                    score1 = match.get('score_team1', 0)
-                    score2 = match.get('score_team2', 0)
+                    score1 = match.get('team1_score', 0)
+                    score2 = match.get('team2_score', 0)
                     matches_text += f"Матч #{match_id}: {player1} **{score1}** - **{score2}** {player2}\n"
                 else:
                     matches_text += f"Матч #{match_id}: {player1} vs {player2}\n"
@@ -113,12 +120,16 @@ def generate_tournament_bracket(tournament_id):
         if not tournament:
             return (False, "Турнир не найден")
         
-        # Get all matches for this tournament
+        # Get all matches for this tournament including player information
         cursor.execute(
-            """SELECT m.*, t1.team_name as team1_name, t2.team_name as team2_name 
+            """SELECT m.*, 
+                  t1.team_name as team1_name, t2.team_name as team2_name,
+                  p1.username as player1_name, p2.username as player2_name
                FROM tournament_matches m 
                LEFT JOIN tournament_teams t1 ON m.team1_id = t1.id 
                LEFT JOIN tournament_teams t2 ON m.team2_id = t2.id 
+               LEFT JOIN players p1 ON m.player1_id = p1.user_id
+               LEFT JOIN players p2 ON m.player2_id = p2.user_id
                WHERE m.tournament_id = ? 
                ORDER BY m.round, m.id""", 
             (tournament_id,)

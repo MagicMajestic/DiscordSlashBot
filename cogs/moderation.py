@@ -238,7 +238,36 @@ class TournamentResultModal(discord.ui.Modal):
             # Send to results channel
             results_channel = interaction.client.get_channel(TOURNAMENT_RESULTS_CHANNEL)
             if results_channel:
+                # Получаем информацию о турнире
+                cursor.execute("SELECT * FROM tournaments WHERE id = ?", (match['tournament_id'],))
+                tournament = cursor.fetchone()
+                
+                # Добавляем эмбед с информацией о типе матча
+                match_info = ""
+                if tournament:
+                    match_type = tournament.get('match_type', 'BO1')
+                    if match_type == 'BO1':
+                        match_info = "Одиночный матч"
+                    elif match_type == 'BO3':
+                        match_info = f"Матч до 2 побед ({match_type})"
+                    elif match_type == 'BO5':
+                        match_info = f"Матч до 3 побед ({match_type})"
+                    elif match_type == 'BO7':
+                        match_info = f"Матч до 4 побед ({match_type})"
+                    
+                    # Добавляем информацию о формате матча
+                    embed.add_field(name="Формат матча", value=match_info, inline=False)
+                
+                # Отправляем уведомление о результатах
                 await results_channel.send(embed=embed)
+                
+                # Обновляем и публикуем сетку турнира
+                if tournament:
+                    from utils.brackets import generate_tournament_bracket
+                    success, bracket = generate_tournament_bracket(match['tournament_id'])
+                    
+                    if success:
+                        await results_channel.send(embed=bracket)
             
             await interaction.response.send_message("Результаты матча успешно сохранены!", ephemeral=True)
             
@@ -841,27 +870,65 @@ class Moderation(commands.Cog):
                     wins_needed = 3
                 elif match_type == 'BO7':
                     wins_needed = 4
-                    
-                cursor.execute(
-                    """
-                    SELECT 
-                        CASE 
-                            WHEN team1_score >= ? THEN team1_id
-                            WHEN team2_score >= ? THEN team2_id
-                            ELSE NULL
-                        END as winner_id,
-                        CASE 
-                            WHEN team1_score >= ? THEN player1_id
-                            WHEN team2_score >= ? THEN player2_id
-                            ELSE NULL
-                        END as winner_player_id
-                    FROM tournament_matches 
-                    WHERE tournament_id = ? AND round = ?
-                    """,
-                    (wins_needed, wins_needed, wins_needed, wins_needed, tournament_id, current_round)
-                )
                 
-                winners = cursor.fetchall()
+                # Для матчей типа BO3/BO5/BO7 мы сводим победы по игрокам/командам
+                if match_type in ['BO3', 'BO5', 'BO7']:
+                    # Получаем все пары игроков/команд в текущем раунде
+                    cursor.execute(
+                        """
+                        SELECT DISTINCT
+                            MIN(CASE WHEN team1_id IS NOT NULL THEN team1_id WHEN player1_id IS NOT NULL THEN player1_id ELSE 0 END) as id1,
+                            MIN(CASE WHEN team2_id IS NOT NULL THEN team2_id WHEN player2_id IS NOT NULL THEN player2_id ELSE 0 END) as id2,
+                            SUM(CASE WHEN team1_score > team2_score THEN 1 ELSE 0 END) as team1_wins,
+                            SUM(CASE WHEN team2_score > team1_score THEN 1 ELSE 0 END) as team2_wins
+                        FROM tournament_matches 
+                        WHERE tournament_id = ? AND round = ? AND completed = 1
+                        GROUP BY 
+                            CASE WHEN team1_id IS NOT NULL THEN team1_id ELSE player1_id END,
+                            CASE WHEN team2_id IS NOT NULL THEN team2_id ELSE player2_id END
+                        """,
+                        (tournament_id, current_round)
+                    )
+                    
+                    match_pairings = cursor.fetchall()
+                    
+                    # Формируем список победителей
+                    winners = []
+                    for pairing in match_pairings:
+                        # Если одна из сторон достигла необходимого количества побед
+                        if pairing['team1_wins'] >= wins_needed:
+                            # В зависимости от типа турнира - индивидуальный или командный
+                            if tournament['type'] == 'public':
+                                winners.append({'winner_id': pairing['id1'], 'winner_player_id': None})
+                            else:
+                                winners.append({'winner_id': None, 'winner_player_id': pairing['id1']})
+                        elif pairing['team2_wins'] >= wins_needed:
+                            if tournament['type'] == 'public':
+                                winners.append({'winner_id': pairing['id2'], 'winner_player_id': None})
+                            else:
+                                winners.append({'winner_id': None, 'winner_player_id': pairing['id2']})
+                else:
+                    # Для матчей BO1 используем старую логику
+                    cursor.execute(
+                        """
+                        SELECT 
+                            CASE 
+                                WHEN team1_score > team2_score THEN team1_id
+                                WHEN team2_score > team1_score THEN team2_id
+                                ELSE NULL
+                            END as winner_id,
+                            CASE 
+                                WHEN team1_score > team2_score THEN player1_id
+                                WHEN team2_score > team1_score THEN player2_id
+                                ELSE NULL
+                            END as winner_player_id
+                        FROM tournament_matches 
+                        WHERE tournament_id = ? AND round = ? AND completed = 1
+                        """,
+                        (tournament_id, current_round)
+                    )
+                    
+                    winners = cursor.fetchall()
                 
                 # Handle team tournaments vs player tournaments differently
                 if tournament['type'] == 'public':
@@ -1096,6 +1163,48 @@ class Moderation(commands.Cog):
                     )
             
             await interaction.response.send_message(embed=embed)
+            
+            # Отправляем уведомления о начале матча участникам
+            channel = self.bot.get_channel(TOURNAMENT_RESULTS_CHANNEL)
+            if channel:
+                if tournament['type'] == 'private':
+                    # Получаем всех участников и тегаем их
+                    match_participants = set()
+                    for match in new_matches:
+                        cursor.execute(
+                            """SELECT player1_id, player2_id FROM tournament_matches WHERE id = ?""", 
+                            (match['id'],)
+                        )
+                        match_data = cursor.fetchone()
+                        if match_data and match_data['player1_id']:
+                            match_participants.add(match_data['player1_id'])
+                        if match_data and match_data['player2_id']:
+                            match_participants.add(match_data['player2_id'])
+                    
+                    # Формируем упоминания и отправляем уведомление
+                    mentions = ' '.join([f"<@{p_id}>" for p_id in match_participants])
+                    if mentions:
+                        match_notification = discord.Embed(
+                            title=f"⚡ Новый раунд в турнире {tournament['name']}",
+                            description=f"Ваши матчи созданы! Проверьте сетку турнира, чтобы найти свой матч.",
+                            color=0x1ABC9C  # Teal
+                        )
+                        await channel.send(mentions, embed=match_notification)
+                else:
+                    # Для командных турниров просто отправляем уведомление без тегов
+                    match_notification = discord.Embed(
+                        title=f"⚡ Новый раунд в турнире {tournament['name']}",
+                        description=f"Новые матчи созданы! Представители команд, проверьте сетку турнира.",
+                        color=0x1ABC9C  # Teal
+                    )
+                    await channel.send(embed=match_notification)
+            
+            # Обновляем и публикуем турнирную сетку
+            from utils.brackets import generate_tournament_bracket
+            success, bracket = generate_tournament_bracket(tournament_id)
+            
+            if success and channel:
+                await channel.send(embed=bracket)
             
         except Exception as e:
             logger.error(f"Error creating next matches: {e}")

@@ -179,7 +179,11 @@ def create_match_result_embed(match, score_team1, score_team2):
     
     # Добавляем информацию о следующем раунде
     if winner_id:
-        embed.add_field(name="Следующий раунд", value=f"{winner_type} ID {winner_id} переходит в следующий раунд", inline=False)
+        if winner_type == 'Игрок':
+            winner_display = f"<@{winner_id}>"
+        else:
+            winner_display = f"{winner_type} ID {winner_id}"
+        embed.add_field(name="Следующий раунд", value=f"{winner_display} переходит в следующий раунд", inline=False)
     
     # Add notes if available
     if match.get('notes') and match['notes'].strip():

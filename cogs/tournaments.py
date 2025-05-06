@@ -499,10 +499,31 @@ class Tournaments(commands.Cog):
                         participants = cursor.fetchall()
                         mentions = ' '.join([f"<@{p['user_id']}>" for p in participants])
                         
+                        # Получаем тип матчей (BO1, BO3 и т.д.)
+                        match_type = tournament.get('match_type', 'BO1')
+                        
                         tournament_start_embed = discord.Embed(
                             title=f"🎮 Турнир начался: {tournament['name']}",
                             description=f"Турнирная сетка сформирована. Первые матчи созданы!",
                             color=0x2ECC71  # Green
+                        )
+                        
+                        # Добавляем информацию о типе матчей (BO1, BO3 и т.д.)
+                        if match_type == 'BO1':
+                            match_desc = "Матчи проводятся до 1 победы"
+                        elif match_type == 'BO3':
+                            match_desc = "Матчи проводятся до 2 побед"
+                        elif match_type == 'BO5':
+                            match_desc = "Матчи проводятся до 3 побед"
+                        elif match_type == 'BO7':
+                            match_desc = "Матчи проводятся до 4 побед"
+                        else:
+                            match_desc = "Одиночные матчи"
+                        
+                        tournament_start_embed.add_field(
+                            name="Формат матчей", 
+                            value=f"{match_type}: {match_desc}", 
+                            inline=False
                         )
                         
                         # Show where to find match ID and other info
@@ -514,10 +535,23 @@ class Tournaments(commands.Cog):
                         
                         tournament_start_embed.set_footer(text=f"Турнир ID: {tournament['id']}")
                         
-                        await channel.send(
-                            f"🏆 **ТУРНИР НАЧАЛСЯ!** Участники: {mentions}", 
-                            embeds=[tournament_start_embed, bracket]
-                        )
+                        # Отправляем уведомление о начале турнира
+                        try:
+                            await channel.send(
+                                f"🏆 **ТУРНИР НАЧАЛСЯ!** Участники: {mentions}", 
+                                embeds=[tournament_start_embed, bracket]
+                            )
+                            
+                            # Отправляем в канал результатов также
+                            results_channel = self.bot.get_channel(TOURNAMENT_RESULTS_CHANNEL)
+                            if results_channel:
+                                await results_channel.send(
+                                    f"🏆 **ТУРНИР НАЧАЛСЯ!** Следите за результатами.", 
+                                    embeds=[tournament_start_embed, bracket]
+                                )
+                        except Exception as e:
+                            logger.error(f"Error sending tournament start notification: {e}")
+                    
                         
             except Exception as e:
                 logger.error(f"Error starting tournament {tournament['id']}: {e}")
@@ -925,6 +959,177 @@ class Tournaments(commands.Cog):
         except Exception as e:
             logger.error(f"Error displaying tournament bracket: {e}")
             await interaction.followup.send("Произошла ошибка при отображении турнирной сетки.", ephemeral=True)
+
+    @app_commands.command(
+        name="tournament-team-add",
+        description="Добавить команду на публичный турнир (только для организаторов)"
+    )
+    @app_commands.describe(
+        tournament_id="ID публичного турнира",
+        team_name="Название команды",
+        members="Участники команды через запятую, например: @user1, @user2, @user3"
+    )
+    @app_commands.check(is_tournament_manager)
+    async def tournament_team_add(self, interaction: discord.Interaction, tournament_id: int, team_name: str, members: str):
+        await interaction.response.defer(ephemeral=True)
+        
+        db = get_db()
+        cursor = db.cursor()
+        
+        try:
+            # Проверяем, что турнир существует и является публичным
+            cursor.execute(
+                "SELECT * FROM tournaments WHERE id = ? AND type = 'public' AND status = 'approved'",
+                (tournament_id,)
+            )
+            tournament = cursor.fetchone()
+            
+            if not tournament:
+                await interaction.followup.send("Публичный турнир с указанным ID не найден или не подтвержден.", ephemeral=True)
+                return
+            
+            # Проверяем, что команда с таким названием еще не зарегистрирована
+            cursor.execute(
+                "SELECT COUNT(*) FROM tournament_teams WHERE tournament_id = ? AND team_name = ?",
+                (tournament_id, team_name)
+            )
+            
+            if cursor.fetchone()[0] > 0:
+                await interaction.followup.send(f"Команда '{team_name}' уже зарегистрирована на этот турнир!", ephemeral=True)
+                return
+            
+            # Извлекаем ID участников из строки с упоминаниями
+            member_ids = []
+            for member_mention in members.split(','):
+                member_mention = member_mention.strip()
+                if member_mention.startswith('<@') and member_mention.endswith('>'):
+                    user_id = member_mention[2:-1]
+                    if user_id.startswith('!'):
+                        user_id = user_id[1:]
+                    try:
+                        member_ids.append(int(user_id))
+                    except ValueError:
+                        continue
+            
+            # Проверяем, что количество участников соответствует требованиям турнира
+            if len(member_ids) != tournament['participants_per_team']:
+                await interaction.followup.send(
+                    f"Количество участников команды ({len(member_ids)}) не соответствует требованиям турнира ({tournament['participants_per_team']})",
+                    ephemeral=True
+                )
+                return
+            
+            # Регистрируем команду
+            cursor.execute(
+                "INSERT INTO tournament_teams (tournament_id, team_name, captain_id, registration_date) VALUES (?, ?, ?, ?)",
+                (tournament_id, team_name, member_ids[0], datetime.datetime.now())
+            )
+            
+            team_id = cursor.lastrowid
+            
+            # Добавляем всех участников
+            for user_id in member_ids:
+                # Добавляем участника в таблицу players, если его еще нет
+                cursor.execute(
+                    "INSERT OR IGNORE INTO players (user_id, username) VALUES (?, ?)",
+                    (user_id, f"User{user_id}")
+                )
+                
+                # Добавляем участие в турнире
+                cursor.execute(
+                    "INSERT INTO tournament_participants (tournament_id, user_id, join_date) VALUES (?, ?, ?)",
+                    (tournament_id, user_id, datetime.datetime.now())
+                )
+            
+            db.commit()
+            
+            # Отправляем сообщение об успешной регистрации
+            members_mentions = ", ".join([f"<@{user_id}>" for user_id in member_ids])
+            await interaction.followup.send(
+                f"✅ Команда '{team_name}' успешно зарегистрирована на турнир #{tournament_id}!\n"
+                f"Участники: {members_mentions}",
+                ephemeral=False
+            )
+            
+            # Обновляем сообщение с анонсом турнира
+            channel = self.bot.get_channel(PUBLIC_TOURNAMENTS_CHANNEL)
+            if channel:
+                try:
+                    async for message in channel.history(limit=200):
+                        for embed in message.embeds:
+                            if embed.fields and any(field.name == "ID Турнира" and field.value == f"#{tournament_id}" for field in embed.fields):
+                                # Получаем количество зарегистрированных команд
+                                cursor.execute(
+                                    "SELECT COUNT(*) FROM tournament_teams WHERE tournament_id = ?",
+                                    (tournament_id,)
+                                )
+                                team_count = cursor.fetchone()[0]
+                                
+                                # Обновляем embed с новым количеством команд
+                                new_embed = discord.Embed(
+                                    title=embed.title,
+                                    description=embed.description,
+                                    color=embed.color
+                                )
+                                
+                                for field in embed.fields:
+                                    if field.name == "Зарегистрировано команд":
+                                        new_embed.add_field(name=field.name, value=f"{team_count}", inline=field.inline)
+                                    else:
+                                        new_embed.add_field(name=field.name, value=field.value, inline=field.inline)
+                                
+                                await message.edit(embed=new_embed)
+                                break
+                except Exception as e:
+                    logger.error(f"Error updating tournament message: {e}")
+            
+        except Exception as e:
+            logger.error(f"Error registering team: {e}")
+            db.rollback()
+            await interaction.followup.send(f"Произошла ошибка при регистрации команды: {e}", ephemeral=True)
+
+    @app_commands.command(
+        name="tournament-type",
+        description="Установить тип турнира (BO1, BO3, BO5 и т.д.)"
+    )
+    @app_commands.describe(
+        tournament_id="ID турнира",
+        match_type="Тип матчей: BO1 (до 1 победы), BO3 (до 2 побед), BO5 (до 3 побед) и т.д."
+    )
+    @app_commands.check(is_tournament_manager)
+    async def tournament_type(self, interaction: discord.Interaction, tournament_id: int, match_type: str):
+        await interaction.response.defer(ephemeral=True)
+        
+        valid_types = ["BO1", "BO3", "BO5", "BO7"]
+        if match_type.upper() not in valid_types:
+            await interaction.followup.send(
+                f"Неверный тип матчей. Поддерживаемые типы: {', '.join(valid_types)}",
+                ephemeral=True
+            )
+            return
+        
+        db = get_db()
+        cursor = db.cursor()
+        
+        # Добавим поле match_type в таблицу tournaments, если его еще нет
+        cursor.execute("PRAGMA table_info(tournaments)")
+        columns = [column[1] for column in cursor.fetchall()]
+        
+        if "match_type" not in columns:
+            cursor.execute("ALTER TABLE tournaments ADD COLUMN match_type TEXT DEFAULT 'BO1'")
+        
+        # Обновляем тип матчей для турнира
+        cursor.execute(
+            "UPDATE tournaments SET match_type = ? WHERE id = ?",
+            (match_type.upper(), tournament_id)
+        )
+        
+        db.commit()
+        
+        await interaction.followup.send(
+            f"✅ Тип матчей для турнира #{tournament_id} установлен как {match_type.upper()}",
+            ephemeral=False
+        )
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Tournaments(bot))

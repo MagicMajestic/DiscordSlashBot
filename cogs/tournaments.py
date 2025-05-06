@@ -312,13 +312,24 @@ class Tournaments(commands.Cog):
     def cog_unload(self):
         self.check_upcoming_tournaments.cancel()
     
-    @tasks.loop(minutes=5)
+    @tasks.loop(minutes=1)  # Уменьшим интервал для быстрого тестирования
     async def check_upcoming_tournaments(self):
         """Check for tournaments starting soon and send notifications."""
+        logger.info("Running check_upcoming_tournaments task...")
         db = get_db()
         cursor = db.cursor()
         
         now = datetime.datetime.now()
+        logger.info(f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # Логируем состояние турнира 10000
+        cursor.execute(
+            "SELECT id, name, status, tournament_date, started FROM tournaments WHERE id = 10000"
+        )
+        tournament_10000 = cursor.fetchone()
+        if tournament_10000:
+            logger.info(f"Tournament 10000 status: {tournament_10000}")
+
         
         # 1. Get tournaments starting in the next 15 minutes (for notifications)
         notification_threshold = now + datetime.timedelta(minutes=15)

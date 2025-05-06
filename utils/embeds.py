@@ -23,6 +23,8 @@ def create_private_tournament_embed(tournament):
     else:
         tournament_date = tournament['tournament_date'].strftime("%d.%m.%Y, %H:%M")
     
+    # Добавление ID турнира в основные поля
+    embed.add_field(name="ID Турнира", value=f"#{tournament['id']}", inline=True)
     embed.add_field(name="Дата", value=tournament_date, inline=True)
     embed.add_field(name="Участники", value=f"0/{tournament['max_participants']}", inline=True)
     
@@ -30,6 +32,9 @@ def create_private_tournament_embed(tournament):
         embed.add_field(name="Вступительный взнос", value=f"{tournament['entry_fee']}$ (передать организатору)", inline=False)
     
     embed.add_field(name="Организатор", value=f"<@{tournament['creator_id']}> ({tournament['creator_name']})", inline=False)
+    
+    # Добавление футера с ID для удобства использования в командах
+    embed.set_footer(text=f"Для взаимодействия с этим турниром используйте ID: {tournament['id']}")
     
     return embed
 
@@ -55,6 +60,8 @@ def create_public_tournament_embed(tournament):
     else:
         tournament_date = tournament['tournament_date'].strftime("%d.%m.%Y, %H:%M")
     
+    # Добавление ID турнира в основные поля
+    embed.add_field(name="ID Турнира", value=f"#{tournament['id']}", inline=True)
     embed.add_field(name="Дата", value=tournament_date, inline=True)
     embed.add_field(name="Участников на команду", value=str(tournament['participants_per_team']), inline=True)
     
@@ -63,6 +70,9 @@ def create_public_tournament_embed(tournament):
     
     embed.add_field(name="Правила", value=tournament['rules'], inline=False)
     embed.add_field(name="Организатор", value=f"<@{tournament['creator_id']}> ({tournament['creator_name']})", inline=False)
+    
+    # Добавление футера с ID для удобства использования в командах
+    embed.set_footer(text=f"Для взаимодействия с этим турниром используйте ID: {tournament['id']}")
     
     return embed
 
@@ -93,7 +103,12 @@ def create_tournament_notification_embed(tournament):
     else:
         tournament_date = tournament['tournament_date'].strftime("%d.%m.%Y, %H:%M")
     
+    # Добавление ID турнира и даты
+    embed.add_field(name="ID Турнира", value=f"#{tournament['id']}", inline=True)
     embed.add_field(name="Дата и время", value=tournament_date, inline=True)
+    
+    # Добавление футера с ID для удобства использования в командах
+    embed.set_footer(text=f"Для взаимодействия с этим турниром используйте ID: {tournament['id']}")
     
     return embed
 
@@ -115,6 +130,10 @@ def create_match_result_embed(match, score_team1, score_team2):
         color=0xF1C40F  # Gold for results
     )
     
+    # Добавляем ID турнира для удобного отслеживания
+    embed.add_field(name="ID Турнира", value=f"#{match['tournament_id']}", inline=True)
+    embed.add_field(name="Раунд", value=f"{match.get('round', '?')}", inline=True)
+    
     # Determine if this is a team match or player match
     if match.get('team1_name') and match.get('team2_name'):
         # Team match
@@ -125,10 +144,16 @@ def create_match_result_embed(match, score_team1, score_team2):
         # Determine winner
         if score_team1 > score_team2:
             embed.add_field(name="Победитель", value=match['team1_name'], inline=False)
+            winner_id = match.get('team1_id', None)
+            winner_type = 'Команда'
         elif score_team2 > score_team1:
             embed.add_field(name="Победитель", value=match['team2_name'], inline=False)
+            winner_id = match.get('team2_id', None)
+            winner_type = 'Команда'
         else:
             embed.add_field(name="Результат", value="Ничья", inline=False)
+            winner_id = None
+            winner_type = None
     else:
         # Player match
         player1_name = f"<@{match['player1_id']}>"
@@ -141,13 +166,26 @@ def create_match_result_embed(match, score_team1, score_team2):
         # Determine winner
         if score_team1 > score_team2:
             embed.add_field(name="Победитель", value=player1_name, inline=False)
+            winner_id = match.get('player1_id', None)
+            winner_type = 'Игрок'
         elif score_team2 > score_team1:
             embed.add_field(name="Победитель", value=player2_name, inline=False)
+            winner_id = match.get('player2_id', None) 
+            winner_type = 'Игрок'
         else:
             embed.add_field(name="Результат", value="Ничья", inline=False)
+            winner_id = None
+            winner_type = None
+    
+    # Добавляем информацию о следующем раунде
+    if winner_id:
+        embed.add_field(name="Следующий раунд", value=f"{winner_type} ID {winner_id} переходит в следующий раунд", inline=False)
     
     # Add notes if available
     if match.get('notes') and match['notes'].strip():
         embed.add_field(name="Заметки", value=match['notes'], inline=False)
+    
+    # Добавление футера с ID турнира и матча
+    embed.set_footer(text=f"Турнир #{match['tournament_id']} | Матч #{match['id']}")
     
     return embed

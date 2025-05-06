@@ -8,11 +8,11 @@ from typing import Optional
 from utils.db import get_db
 from utils.permissions import is_tournament_manager, is_admin
 from utils.embeds import create_match_result_embed
-from utils.constants import TOURNAMENT_RESULTS_CHANNEL
+from utils.constants import TOURNAMENT_RESULTS_CHANNEL, PRIVATE_TOURNAMENTS_CHANNEL, PUBLIC_TOURNAMENTS_CHANNEL
 
 logger = logging.getLogger(__name__)
 
-class TournamentResultModal(discord.ui.Modal, title="Результат матча"):
+class TournamentResultModal(discord.ui.Modal):
     score_team1 = discord.ui.TextInput(
         label="Очки команды 1",
         style=discord.TextStyle.short,
@@ -40,7 +40,7 @@ class TournamentResultModal(discord.ui.Modal, title="Результат матч
     )
     
     def __init__(self, match_id: int):
-        super().__init__()
+        super().__init__(title="Результат матча")
         self.match_id = match_id
         
     async def on_submit(self, interaction: discord.Interaction):
@@ -139,15 +139,23 @@ class TournamentResultModal(discord.ui.Modal, title="Результат матч
                             (loser_id,)
                         )
                         
+                        # Get tournament type
+                        cursor.execute(
+                            "SELECT type FROM tournaments WHERE id = ?",
+                            (match['tournament_id'],)
+                        )
+                        tournament = cursor.fetchone()
+                        tournament_type = tournament['type'] if tournament else 'private'
+                        
                         # Update player_stats table
                         cursor.execute(
-                            "INSERT INTO player_stats (user_id, tournament_id, place) VALUES (?, ?, ?)",
-                            (winner_id, match['tournament_id'], 1)
+                            "INSERT INTO player_stats (user_id, tournament_id, place, tournament_type) VALUES (?, ?, ?, ?)",
+                            (winner_id, match['tournament_id'], 1, tournament_type)
                         )
                         
                         cursor.execute(
-                            "INSERT INTO player_stats (user_id, tournament_id, place) VALUES (?, ?, ?)",
-                            (loser_id, match['tournament_id'], 2)
+                            "INSERT INTO player_stats (user_id, tournament_id, place, tournament_type) VALUES (?, ?, ?, ?)",
+                            (loser_id, match['tournament_id'], 2, tournament_type)
                         )
                         
                         # Check for achievements
@@ -305,9 +313,314 @@ class TournamentResultModal(discord.ui.Modal, title="Результат матч
                     logger.error(f"Could not send achievement notification to user {user_id}")
 
 
+class TournamentRescheduleModal(discord.ui.Modal):
+    new_date = discord.ui.TextInput(
+        label="Новая дата и время",
+        style=discord.TextStyle.short,
+        placeholder="Введите в формате ДД.ММ.ГГГГ ЧЧ:ММ (напр.: 20.05.2025 21:00)",
+        required=True,
+        min_length=16,
+        max_length=16
+    )
+    
+    reason = discord.ui.TextInput(
+        label="Причина переноса",
+        style=discord.TextStyle.paragraph,
+        placeholder="Укажите причину переноса турнира...",
+        required=True,
+        max_length=1000
+    )
+    
+    def __init__(self, tournament_id: int):
+        super().__init__(title="Перенос турнира")
+        self.tournament_id = tournament_id
+        
+    async def on_submit(self, interaction: discord.Interaction):
+        # Сначала отложим ответ на взаимодействие
+        await interaction.response.defer(ephemeral=True)
+        
+        # Verify permissions
+        if not await is_tournament_manager(interaction) and not await is_admin(interaction):
+            await interaction.followup.send("У вас нет прав для этого действия!", ephemeral=True)
+            return
+        
+        # Get database connection
+        db = get_db()
+        cursor = db.cursor()
+        
+        try:
+            # Parse new date
+            try:
+                parsed_date = datetime.datetime.strptime(self.new_date.value, "%d.%m.%Y %H:%M")
+            except ValueError:
+                await interaction.followup.send(
+                    "Некорректный формат даты. Используйте формат ДД.ММ.ГГГГ ЧЧ:ММ (например: 20.05.2025 21:00)", 
+                    ephemeral=True
+                )
+                return
+                
+            # Check if date is in the future
+            if parsed_date <= datetime.datetime.now():
+                await interaction.followup.send("Дата турнира должна быть в будущем.", ephemeral=True)
+                return
+            
+            # Check if tournament exists
+            cursor.execute("SELECT * FROM tournaments WHERE id = ?", (self.tournament_id,))
+            tournament = cursor.fetchone()
+            
+            if not tournament:
+                await interaction.followup.send(f"Турнир с ID {self.tournament_id} не найден!", ephemeral=True)
+                return
+            
+            # Store old date for notification
+            old_date = None
+            if 'tournament_date' in tournament:
+                if isinstance(tournament['tournament_date'], str):
+                    old_date = tournament['tournament_date']
+                else:
+                    old_date = tournament['tournament_date'].strftime("%d.%m.%Y, %H:%M")
+            
+            # Update tournament date
+            cursor.execute(
+                "UPDATE tournaments SET tournament_date = ? WHERE id = ?",
+                (parsed_date.strftime('%Y-%m-%d %H:%M:%S'), self.tournament_id)
+            )
+            
+            db.commit()
+            
+            # Get participants to notify them
+            cursor.execute(
+                "SELECT user_id FROM tournament_participants WHERE tournament_id = ?",
+                (self.tournament_id,)
+            )
+            
+            participants = cursor.fetchall()
+            
+            # Create notification embed
+            embed = discord.Embed(
+                title=f"Турнир перенесен: {tournament['name']}",
+                description=f"Турнир был перенесен на новую дату.",
+                color=0x3498DB  # Blue
+            )
+            
+            embed.add_field(name="ID Турнира", value=f"#{self.tournament_id}", inline=True)
+            
+            if old_date:
+                embed.add_field(name="Старая дата", value=old_date, inline=True)
+                
+            embed.add_field(name="Новая дата", value=self.new_date.value, inline=True)
+            embed.add_field(name="Причина", value=self.reason.value, inline=False)
+            embed.add_field(name="Действие выполнено", value=f"<@{interaction.user.id}>", inline=False)
+            
+            # Notify participants via DM
+            participant_mentions = ""
+            for participant in participants:
+                try:
+                    user = await interaction.client.fetch_user(participant['user_id'])
+                    if user:
+                        participant_mentions += f"<@{participant['user_id']}> "
+                        await user.send(embed=embed)
+                except Exception as e:
+                    logger.error(f"Could not send DM to user {participant['user_id']}: {e}")
+            
+            # Send notification to the appropriate channel based on tournament type
+            if tournament['type'] == 'private':
+                channel_id = PRIVATE_TOURNAMENTS_CHANNEL
+            else:
+                channel_id = PUBLIC_TOURNAMENTS_CHANNEL
+                
+            channel = interaction.client.get_channel(channel_id)
+            if channel:
+                await channel.send(content=f"**ВНИМАНИЕ! ТУРНИР ПЕРЕНЕСЕН!** {participant_mentions}", embed=embed)
+            
+            await interaction.followup.send("Турнир успешно перенесен на новую дату! Участники уведомлены.", ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Error rescheduling tournament: {e}")
+            db.rollback()
+            await interaction.followup.send("Произошла ошибка при переносе турнира.", ephemeral=True)
+
+
+class TournamentCancelModal(discord.ui.Modal):
+    reason = discord.ui.TextInput(
+        label="Причина отмены",
+        style=discord.TextStyle.paragraph,
+        placeholder="Укажите причину отмены турнира...",
+        required=True,
+        max_length=1000
+    )
+    
+    def __init__(self, tournament_id: int):
+        super().__init__(title="Отмена турнира")
+        self.tournament_id = tournament_id
+        
+    async def on_submit(self, interaction: discord.Interaction):
+        # Сначала отложим ответ на взаимодействие
+        await interaction.response.defer(ephemeral=True)
+        
+        # Verify permissions
+        if not await is_tournament_manager(interaction) and not await is_admin(interaction):
+            await interaction.followup.send("У вас нет прав для этого действия!", ephemeral=True)
+            return
+        
+        # Get database connection
+        db = get_db()
+        cursor = db.cursor()
+        
+        try:
+            # Check if tournament exists
+            cursor.execute("SELECT * FROM tournaments WHERE id = ?", (self.tournament_id,))
+            tournament = cursor.fetchone()
+            
+            if not tournament:
+                await interaction.followup.send(f"Турнир с ID {self.tournament_id} не найден!", ephemeral=True)
+                return
+            
+            # Проверяем, что турнир не завершен
+            if tournament['status'] == 'completed':
+                await interaction.followup.send("Нельзя отменить завершенный турнир!", ephemeral=True)
+                return
+            
+            # Меняем статус турнира на 'cancelled'
+            cursor.execute(
+                "UPDATE tournaments SET status = 'cancelled', cancellation_reason = ? WHERE id = ?",
+                (self.reason.value, self.tournament_id)
+            )
+            
+            # Получаем список участников для уведомления
+            cursor.execute(
+                "SELECT user_id FROM tournament_participants WHERE tournament_id = ?",
+                (self.tournament_id,)
+            )
+            
+            participants = cursor.fetchall()
+            
+            # Создаем эмбед с уведомлением об отмене
+            embed = discord.Embed(
+                title=f"Турнир отменен: {tournament['name']}",
+                description=f"Турнир ID {self.tournament_id} был отменен.",
+                color=0xE74C3C  # Красный - для отмены
+            )
+            
+            embed.add_field(name="ID Турнира", value=f"#{self.tournament_id}", inline=True)
+            embed.add_field(name="Название", value=tournament['name'], inline=True)
+            
+            # Добавляем информацию о дате турнира
+            if 'tournament_date' in tournament:
+                if isinstance(tournament['tournament_date'], str):
+                    tournament_date = tournament['tournament_date']
+                else:
+                    tournament_date = tournament['tournament_date'].strftime("%d.%m.%Y, %H:%M")
+                embed.add_field(name="Дата", value=tournament_date, inline=True)
+            
+            embed.add_field(name="Причина отмены", value=self.reason.value, inline=False)
+            embed.add_field(name="Действие выполнено", value=f"<@{interaction.user.id}>", inline=False)
+            
+            # Уведомляем участников через DM
+            participant_mentions = ""
+            for participant in participants:
+                try:
+                    user = await interaction.client.fetch_user(participant['user_id'])
+                    if user:
+                        participant_mentions += f"<@{participant['user_id']}> "
+                        await user.send(embed=embed)
+                except Exception as e:
+                    logger.error(f"Could not send DM to user {participant['user_id']}: {e}")
+            
+            # Отправляем уведомление в соответствующий канал
+            if tournament['type'] == 'private':
+                channel_id = PRIVATE_TOURNAMENTS_CHANNEL
+            else:
+                channel_id = PUBLIC_TOURNAMENTS_CHANNEL
+                
+            channel = interaction.client.get_channel(channel_id)
+            if channel:
+                await channel.send(content=f"**ВНИМАНИЕ! ТУРНИР ОТМЕНЕН!** {participant_mentions}", embed=embed)
+            
+            db.commit()
+            await interaction.followup.send("Турнир успешно отменен. Участники уведомлены.", ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Error cancelling tournament: {e}")
+            db.rollback()
+            await interaction.followup.send("Произошла ошибка при отмене турнира.", ephemeral=True)
+
+
 class Moderation(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+    
+    @app_commands.command(
+        name="tournament-cancel",
+        description="Отменить турнир"
+    )
+    @app_commands.describe(
+        tournament_id="ID турнира"
+    )
+    async def tournament_cancel(self, interaction: discord.Interaction, tournament_id: int):
+        # Verify permissions
+        if not await is_tournament_manager(interaction) and not await is_admin(interaction):
+            await interaction.response.send_message("У вас нет прав для этого действия!", ephemeral=True)
+            return
+            
+        # Get database connection
+        db = get_db()
+        cursor = db.cursor()
+        
+        # Check if tournament exists
+        cursor.execute("SELECT * FROM tournaments WHERE id = ?", (tournament_id,))
+        tournament = cursor.fetchone()
+        
+        if not tournament:
+            await interaction.response.send_message(f"Турнир с ID {tournament_id} не найден!", ephemeral=True)
+            return
+        
+        # Check if tournament is completed or already cancelled
+        if tournament['status'] == 'completed':
+            await interaction.response.send_message("Нельзя отменить завершенный турнир!", ephemeral=True)
+            return
+        
+        if tournament['status'] == 'cancelled':
+            await interaction.response.send_message("Этот турнир уже отменен!", ephemeral=True)
+            return
+            
+        # Create a modal for cancellation reason
+        modal = TournamentCancelModal(tournament_id)
+        await interaction.response.send_modal(modal)
+    
+    @app_commands.command(
+        name="tournament-reschedule",
+        description="Перенести турнир на другую дату"
+    )
+    @app_commands.describe(
+        tournament_id="ID турнира"
+    )
+    async def tournament_reschedule(self, interaction: discord.Interaction, tournament_id: int):
+        # Verify permissions
+        if not await is_tournament_manager(interaction) and not await is_admin(interaction):
+            await interaction.response.send_message("У вас нет прав для этого действия!", ephemeral=True)
+            return
+            
+        # Get database connection
+        db = get_db()
+        cursor = db.cursor()
+        
+        # Check if tournament exists
+        cursor.execute("SELECT * FROM tournaments WHERE id = ?", (tournament_id,))
+        tournament = cursor.fetchone()
+        
+        if not tournament:
+            await interaction.response.send_message(f"Турнир с ID {tournament_id} не найден!", ephemeral=True)
+            return
+        
+        # Check if tournament is completed
+        if tournament['status'] == 'completed':
+            await interaction.response.send_message("Нельзя перенести завершенный турнир!", ephemeral=True)
+            return
+            
+        # Create a modal for new date and reason
+        modal = TournamentRescheduleModal(tournament_id)
+        await interaction.response.send_modal(modal)
     
     @app_commands.command(
         name="tournament-set-result",

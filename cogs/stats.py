@@ -44,11 +44,41 @@ class Stats(commands.Cog):
                 
                 await interaction.response.send_message("У вас пока нет статистики турниров.", ephemeral=True)
                 return
-                
-            # Get tournament participation
+            
+            # Get individual tournament stats (private tournaments)
             cursor.execute(
                 """
-                SELECT t.name, ps.place
+                SELECT COUNT(*) as tournaments_count,
+                       SUM(CASE WHEN place = 1 THEN 1 ELSE 0 END) as first_places,
+                       SUM(CASE WHEN place = 2 THEN 1 ELSE 0 END) as second_places,
+                       SUM(CASE WHEN place = 3 THEN 1 ELSE 0 END) as third_places
+                FROM player_stats 
+                WHERE user_id = ? AND tournament_type = 'private'
+                """,
+                (interaction.user.id,)
+            )
+            
+            private_stats = cursor.fetchone() or {'tournaments_count': 0, 'first_places': 0, 'second_places': 0, 'third_places': 0}
+            
+            # Get team tournament stats (public tournaments)
+            cursor.execute(
+                """
+                SELECT COUNT(*) as tournaments_count,
+                       SUM(CASE WHEN place = 1 THEN 1 ELSE 0 END) as first_places,
+                       SUM(CASE WHEN place = 2 THEN 1 ELSE 0 END) as second_places,
+                       SUM(CASE WHEN place = 3 THEN 1 ELSE 0 END) as third_places
+                FROM player_stats 
+                WHERE user_id = ? AND tournament_type = 'public'
+                """,
+                (interaction.user.id,)
+            )
+            
+            public_stats = cursor.fetchone() or {'tournaments_count': 0, 'first_places': 0, 'second_places': 0, 'third_places': 0}
+                
+            # Get tournament participation history
+            cursor.execute(
+                """
+                SELECT t.name, ps.place, t.type, ps.tournament_type
                 FROM player_stats ps
                 JOIN tournaments t ON ps.tournament_id = t.id
                 WHERE ps.user_id = ?
@@ -68,21 +98,55 @@ class Stats(commands.Cog):
             )
             
             # Basic stats
-            embed.add_field(name="Победы", value=str(player['wins']), inline=True)
-            embed.add_field(name="Поражения", value=str(player['losses']), inline=True)
+            total_private = private_stats['tournaments_count'] if private_stats and 'tournaments_count' in private_stats else 0
+            total_public = public_stats['tournaments_count'] if public_stats and 'tournaments_count' in public_stats else 0
             
-            if player['wins'] + player['losses'] > 0:
-                win_rate = round(player['wins'] / (player['wins'] + player['losses']) * 100, 1)
-                embed.add_field(name="Винрейт", value=f"{win_rate}%", inline=True)
+            # Overall stats
+            embed.add_field(name="🎮 Общая статистика", value="""
+            **Победы:** {0}
+            **Поражения:** {1}
+            **Винрейт:** {2}%
+            """.format(
+                player['wins'], 
+                player['losses'], 
+                round(player['wins'] / (player['wins'] + player['losses']) * 100, 1) if player['wins'] + player['losses'] > 0 else 0
+            ), inline=False)
+            
+            # Individual tournaments stats
+            first_places_private = private_stats['first_places'] if private_stats and 'first_places' in private_stats else 0
+            second_places_private = private_stats['second_places'] if private_stats and 'second_places' in private_stats else 0
+            third_places_private = private_stats['third_places'] if private_stats and 'third_places' in private_stats else 0
+            
+            if total_private > 0:
+                embed.add_field(name="🥇 Индивидуальные турниры", value="""
+                **Участие:** {0} турниров
+                **1 место:** {1}
+                **2 место:** {2}
+                **3 место:** {3}
+                """.format(total_private, first_places_private, second_places_private, third_places_private), inline=True)
+            
+            # Team tournaments stats
+            first_places_public = public_stats['first_places'] if public_stats and 'first_places' in public_stats else 0
+            second_places_public = public_stats['second_places'] if public_stats and 'second_places' in public_stats else 0
+            third_places_public = public_stats['third_places'] if public_stats and 'third_places' in public_stats else 0
+            
+            if total_public > 0:
+                embed.add_field(name="👥 Командные турниры", value="""
+                **Участие:** {0} турниров
+                **1 место:** {1}
+                **2 место:** {2}
+                **3 место:** {3}
+                """.format(total_public, first_places_public, second_places_public, third_places_public), inline=True)
             
             # Add tournament history if available
             if participations:
                 history = ""
                 for p in participations:
                     place_emoji = "🥇" if p['place'] == 1 else "🥈" if p['place'] == 2 else "🥉" if p['place'] == 3 else "🎮"
-                    history += f"{place_emoji} {p['name']} - {p['place']} место\n"
+                    tournament_type = "👥" if (p['tournament_type'] == 'public' or p['type'] == 'public') else "🥇"
+                    history += f"{place_emoji} {tournament_type} {p['name']} - {p['place']} место\n"
                 
-                embed.add_field(name="История турниров", value=history, inline=False)
+                embed.add_field(name="📅 История турниров", value=history, inline=False)
             
             await interaction.response.send_message(embed=embed)
             

@@ -11,6 +11,7 @@ from utils.embeds import (
     create_public_tournament_embed,
     create_tournament_notification_embed
 )
+from utils.brackets import generate_tournament_bracket
 from utils.permissions import is_tournament_manager, is_admin
 from utils.constants import (
     TOURNAMENT_APPROVAL_CHANNEL, 
@@ -29,37 +30,55 @@ class TournamentView(discord.ui.View):
         
     @discord.ui.button(label="Участвовать", style=discord.ButtonStyle.primary, custom_id="join_tournament")
     async def join_tournament(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Сначала подтвердим получение взаимодействия
+        await interaction.response.defer(ephemeral=True)
+        
         # Get database connection
         db = get_db()
         cursor = db.cursor()
         
-        # Check if user is already registered
-        cursor.execute(
-            "SELECT COUNT(*) FROM tournament_participants WHERE tournament_id = ? AND user_id = ?",
-            (self.tournament_id, interaction.user.id)
-        )
-        
-        if cursor.fetchone()[0] > 0:
-            await interaction.response.send_message("Вы уже зарегистрированы на этот турнир!", ephemeral=True)
-            return
-            
-        # Check if tournament is full
-        cursor.execute(
-            "SELECT COUNT(*), max_participants FROM tournament_participants JOIN tournaments ON tournament_participants.tournament_id = tournaments.id WHERE tournament_id = ?",
-            (self.tournament_id,)
-        )
-        
-        result = cursor.fetchone()
-        if result and result[0] >= result[1]:
-            await interaction.response.send_message("Турнир уже заполнен!", ephemeral=True)
-            return
-            
-        # Add player to tournament
         try:
+            # Check if user is already registered
+            cursor.execute(
+                "SELECT COUNT(*) as count FROM tournament_participants WHERE tournament_id = ? AND user_id = ?",
+                (self.tournament_id, interaction.user.id)
+            )
+            
+            result = cursor.fetchone()
+            if result and result.get('count', 0) > 0:
+                await interaction.followup.send("Вы уже зарегистрированы на этот турнир!", ephemeral=True)
+                return
+                
+            # First get max participants from the tournament
+            cursor.execute(
+                "SELECT max_participants FROM tournaments WHERE id = ?",
+                (self.tournament_id,)
+            )
+            tournament_info = cursor.fetchone()
+            if not tournament_info or 'max_participants' not in tournament_info:
+                await interaction.followup.send("Ошибка: турнир не найден или данные повреждены.", ephemeral=True)
+                return
+                
+            max_participants = tournament_info['max_participants']
+                
+            # Then check participant count
+            cursor.execute(
+                "SELECT COUNT(*) as count FROM tournament_participants WHERE tournament_id = ?",
+                (self.tournament_id,)
+            )
+            
+            participant_result = cursor.fetchone()
+            participant_count = participant_result.get('count', 0) if participant_result else 0
+            
+            if participant_count >= max_participants:
+                await interaction.followup.send("Турнир уже заполнен!", ephemeral=True)
+                return
+                
+            # Add player to tournament
             # First ensure player exists in players table
             cursor.execute(
                 "INSERT OR IGNORE INTO players (user_id, username) VALUES (?, ?)",
-                (interaction.user.id, interaction.user.name)
+                (interaction.user.id, interaction.user.display_name)
             )
             
             # Then add to tournament participants
@@ -72,49 +91,47 @@ class TournamentView(discord.ui.View):
             
             # Get entry fee
             cursor.execute("SELECT entry_fee FROM tournaments WHERE id = ?", (self.tournament_id,))
-            entry_fee = cursor.fetchone()[0]
+            fee_result = cursor.fetchone()
+            entry_fee = fee_result.get('entry_fee', 0) if fee_result else 0
             
             if entry_fee > 0:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"Вы успешно зарегистрированы! Пожалуйста, передайте вступительный взнос в размере {entry_fee}$ организатору турнира перед началом.", 
                     ephemeral=True
                 )
             else:
-                await interaction.response.send_message("Вы успешно зарегистрированы на турнир!", ephemeral=True)
+                await interaction.followup.send("Вы успешно зарегистрированы на турнир!", ephemeral=True)
                 
             # Update tournament embed
             cursor.execute(
-                "SELECT COUNT(*) FROM tournament_participants WHERE tournament_id = ?",
+                "SELECT COUNT(*) as count FROM tournament_participants WHERE tournament_id = ?",
                 (self.tournament_id,)
             )
-            current_participants = cursor.fetchone()[0]
-            
-            cursor.execute(
-                "SELECT max_participants FROM tournaments WHERE id = ?",
-                (self.tournament_id,)
-            )
-            max_participants = cursor.fetchone()[0]
+            current_result = cursor.fetchone()
+            current_participants = current_result.get('count', 0) if current_result else 0
             
             # Find the original message to edit it
             channel = interaction.channel
-            async for message in channel.history(limit=100):
-                if message.author == interaction.client.user and len(message.embeds) > 0:
-                    embed = message.embeds[0]
-                    for field in embed.fields:
-                        if field.name == "Участники":
-                            embed.set_field_at(
-                                index=embed.fields.index(field),
-                                name="Участники",
-                                value=f"{current_participants}/{max_participants}",
-                                inline=True
-                            )
-                            await message.edit(embed=embed)
-                            break
+            if channel:
+                async for message in channel.history(limit=100):
+                    if message.author.id == interaction.client.user.id and len(message.embeds) > 0:
+                        embed = message.embeds[0]
+                        for i, field in enumerate(embed.fields):
+                            if field.name == "Участники":
+                                embed.set_field_at(
+                                    index=i,
+                                    name="Участники",
+                                    value=f"{current_participants}/{max_participants}",
+                                    inline=True
+                                )
+                                await message.edit(embed=embed)
+                                break
+                        break
                     
         except Exception as e:
             logger.error(f"Error registering user for tournament: {e}")
             db.rollback()
-            await interaction.response.send_message("Произошла ошибка при регистрации. Пожалуйста, попробуйте позже.", ephemeral=True)
+            await interaction.followup.send("Произошла ошибка при регистрации. Пожалуйста, попробуйте позже.", ephemeral=True)
 
 
 class ApprovalView(discord.ui.View):
@@ -125,9 +142,12 @@ class ApprovalView(discord.ui.View):
         
     @discord.ui.button(label="✅ Одобрить", style=discord.ButtonStyle.green, custom_id="approve_tournament")
     async def approve_tournament(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Сначала отложим ответ на взаимодействие
+        await interaction.response.defer(ephemeral=True)
+        
         # Verify permissions
         if not await is_tournament_manager(interaction):
-            await interaction.response.send_message("У вас нет прав для этого действия!", ephemeral=True)
+            await interaction.followup.send("У вас нет прав для этого действия!", ephemeral=True)
             return
             
         # Get database connection
@@ -153,10 +173,14 @@ class ApprovalView(discord.ui.View):
             )
             
             tournament = cursor.fetchone()
+            if not tournament:
+                await interaction.followup.send("Ошибка: турнир не найден.", ephemeral=True)
+                return
+                
             db.commit()
             
             # Find the right channel to post the tournament in
-            if tournament['type'] == 'private':
+            if tournament.get('type') == 'private':
                 channel_id = PRIVATE_TOURNAMENTS_CHANNEL
                 embed = create_private_tournament_embed(tournament)
             else:
@@ -166,26 +190,28 @@ class ApprovalView(discord.ui.View):
             channel = self.bot.get_channel(channel_id)
             if not channel:
                 logger.error(f"Could not find channel with ID {channel_id}")
-                await interaction.response.send_message("Канал для публикации турнира не найден!", ephemeral=True)
+                await interaction.followup.send("Канал для публикации турнира не найден!", ephemeral=True)
                 return
                 
             # Post the tournament in the appropriate channel
             await channel.send(
                 embed=embed,
-                view=TournamentView(tournament_id=self.tournament_id, type_=tournament['type'])
+                view=TournamentView(tournament_id=self.tournament_id, type_=tournament.get('type', 'private'))
             )
             
             # Disable the buttons and edit the message
-            self.approve_tournament.disabled = True
-            self.reject_tournament.disabled = True
-            await interaction.message.edit(view=self)
+            for child in self.children:
+                child.disabled = True
+                
+            if interaction.message:
+                await interaction.message.edit(view=self)
             
-            await interaction.response.send_message("Турнир одобрен и опубликован!", ephemeral=True)
+            await interaction.followup.send("Турнир одобрен и опубликован!", ephemeral=True)
             
         except Exception as e:
             logger.error(f"Error approving tournament: {e}")
             db.rollback()
-            await interaction.response.send_message("Произошла ошибка при одобрении турнира.", ephemeral=True)
+            await interaction.followup.send("Произошла ошибка при одобрении турнира.", ephemeral=True)
     
     @discord.ui.button(label="❌ Отклонить", style=discord.ButtonStyle.red, custom_id="reject_tournament")
     async def reject_tournament(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -195,11 +221,15 @@ class ApprovalView(discord.ui.View):
             return
             
         # Create a modal for rejection reason
-        modal = RejectTournamentModal(self.tournament_id, self)
-        await interaction.response.send_modal(modal)
+        try:
+            modal = RejectTournamentModal(self.tournament_id, self)
+            await interaction.response.send_modal(modal)
+        except Exception as e:
+            logger.error(f"Error sending rejection modal: {e}")
+            await interaction.response.send_message("Произошла ошибка при отклонении турнира.", ephemeral=True)
 
 
-class RejectTournamentModal(discord.ui.Modal, title="Причина отклонения"):
+class RejectTournamentModal(discord.ui.Modal):
     reason = discord.ui.TextInput(
         label="Укажите причину отклонения турнира",
         style=discord.TextStyle.paragraph,
@@ -209,11 +239,14 @@ class RejectTournamentModal(discord.ui.Modal, title="Причина отклон
     )
     
     def __init__(self, tournament_id: int, view: ApprovalView):
-        super().__init__()
+        super().__init__(title="Причина отклонения")
         self.tournament_id = tournament_id
         self.approval_view = view
         
     async def on_submit(self, interaction: discord.Interaction):
+        # Сначала отложим ответ на взаимодействие
+        await interaction.response.defer(ephemeral=True)
+        
         # Get database connection
         db = get_db()
         cursor = db.cursor()
@@ -231,7 +264,12 @@ class RejectTournamentModal(discord.ui.Modal, title="Причина отклон
                 (self.tournament_id,)
             )
             
-            creator_id = cursor.fetchone()['creator_id']
+            result = cursor.fetchone()
+            if not result or 'creator_id' not in result:
+                await interaction.followup.send("Ошибка: турнир не найден или данные повреждены.", ephemeral=True)
+                return
+                
+            creator_id = result['creator_id']
             db.commit()
             
             # Create rejection embed
@@ -246,21 +284,23 @@ class RejectTournamentModal(discord.ui.Modal, title="Причина отклон
             # Notify creator via DM
             try:
                 creator = await interaction.client.fetch_user(creator_id)
-                await creator.send(embed=embed)
+                if creator:
+                    await creator.send(embed=embed)
             except Exception as e:
                 logger.error(f"Could not send DM to user {creator_id}: {e}")
             
             # Disable the buttons and edit the message
-            self.approval_view.approve_tournament.disabled = True
-            self.approval_view.reject_tournament.disabled = True
-            await interaction.message.edit(view=self.approval_view)
+            if interaction.message:
+                for child in self.approval_view.children:
+                    child.disabled = True
+                await interaction.message.edit(view=self.approval_view)
             
-            await interaction.response.send_message("Турнир отклонен, создатель уведомлен о причине.", ephemeral=True)
+            await interaction.followup.send("Турнир отклонен, создатель уведомлен о причине.", ephemeral=True)
             
         except Exception as e:
             logger.error(f"Error rejecting tournament: {e}")
             db.rollback()
-            await interaction.response.send_message("Произошла ошибка при отклонении турнира.", ephemeral=True)
+            await interaction.followup.send("Произошла ошибка при отклонении турнира.", ephemeral=True)
 
 
 class Tournaments(commands.Cog):
@@ -278,8 +318,9 @@ class Tournaments(commands.Cog):
         db = get_db()
         cursor = db.cursor()
         
-        # Get tournaments starting in the next 15 minutes
         now = datetime.datetime.now()
+        
+        # 1. Get tournaments starting in the next 15 minutes (for notifications)
         notification_threshold = now + datetime.timedelta(minutes=15)
         
         cursor.execute(
@@ -322,7 +363,160 @@ class Tournaments(commands.Cog):
             if channel:
                 embed = create_tournament_notification_embed(tournament)
                 await channel.send(content=f"**ВНИМАНИЕ! ТУРНИР СКОРО НАЧНЕТСЯ!** {participant_mentions}", embed=embed)
+        
+        # 2. Get tournaments that should have started but status is still 'approved'
+        cursor.execute(
+            """
+            SELECT t.*, u.username as creator_name 
+            FROM tournaments t
+            JOIN players u ON t.creator_id = u.user_id
+            WHERE t.tournament_date <= ?
+            AND t.status = 'approved'
+            AND t.started = 0
+            """,
+            (now.strftime('%Y-%m-%d %H:%M:%S'),)
+        )
+        
+        started_tournaments = cursor.fetchall()
+        
+        for tournament in started_tournaments:
+            logger.info(f"Starting tournament {tournament['id']} - {tournament['name']}")
             
+            try:
+                # Mark tournament as started
+                cursor.execute(
+                    "UPDATE tournaments SET started = 1, status = 'in_progress' WHERE id = ?",
+                    (tournament['id'],)
+                )
+                
+                # Get participants for private tournament
+                if tournament['type'] == 'private':
+                    cursor.execute(
+                        "SELECT user_id FROM tournament_participants WHERE tournament_id = ?",
+                        (tournament['id'],)
+                    )
+                    
+                    participants = cursor.fetchall()
+                    
+                    # Need at least 2 participants for a tournament
+                    if len(participants) < 2:
+                        logger.warning(f"Tournament {tournament['id']} has less than 2 participants, skipping bracket generation")
+                        continue
+                    
+                    # Create initial matches for the first round - shuffle participants for random matchmaking
+                    import random
+                    participant_ids = [p['user_id'] for p in participants]
+                    random.shuffle(participant_ids)
+                    
+                    # Create matches by pairing participants
+                    for i in range(0, len(participant_ids), 2):
+                        if i + 1 < len(participant_ids):  # Make sure we have a pair
+                            cursor.execute(
+                                """
+                                INSERT INTO tournament_matches 
+                                (tournament_id, round, player1_id, player2_id, creation_date)
+                                VALUES (?, 1, ?, ?, ?)
+                                """,
+                                (
+                                    tournament['id'], 
+                                    participant_ids[i], 
+                                    participant_ids[i+1],
+                                    datetime.datetime.now()
+                                )
+                            )
+                        else:  # Odd number of participants, one gets a bye
+                            # In the future, implement proper bye handling
+                            logger.info(f"Player {participant_ids[i]} gets a bye in first round")
+                
+                # For public tournaments (team-based)
+                else:
+                    cursor.execute(
+                        "SELECT id, team_name FROM tournament_teams WHERE tournament_id = ?",
+                        (tournament['id'],)
+                    )
+                    
+                    teams = cursor.fetchall()
+                    
+                    # Need at least 2 teams for a tournament
+                    if len(teams) < 2:
+                        logger.warning(f"Tournament {tournament['id']} has less than 2 teams, skipping bracket generation")
+                        continue
+                    
+                    # Create initial matches for the first round - shuffle teams for random matchmaking
+                    import random
+                    team_ids = [t['id'] for t in teams]
+                    random.shuffle(team_ids)
+                    
+                    # Create matches by pairing teams
+                    for i in range(0, len(team_ids), 2):
+                        if i + 1 < len(team_ids):  # Make sure we have a pair
+                            cursor.execute(
+                                """
+                                INSERT INTO tournament_matches 
+                                (tournament_id, round, team1_id, team2_id, creation_date)
+                                VALUES (?, 1, ?, ?, ?)
+                                """,
+                                (
+                                    tournament['id'], 
+                                    team_ids[i], 
+                                    team_ids[i+1],
+                                    datetime.datetime.now()
+                                )
+                            )
+                        else:  # Odd number of teams, one gets a bye
+                            # In the future, implement proper bye handling
+                            logger.info(f"Team {team_ids[i]} gets a bye in first round") 
+                
+                # Generate and send the tournament bracket
+                success, bracket = generate_tournament_bracket(tournament['id'])
+                
+                if success:
+                    # Send bracket to the appropriate channel
+                    if tournament['type'] == 'private':
+                        channel_id = PRIVATE_TOURNAMENTS_CHANNEL
+                    else:
+                        channel_id = PUBLIC_TOURNAMENTS_CHANNEL
+                        
+                    channel = self.bot.get_channel(channel_id)
+                    if channel:
+                        # Get participants to mention
+                        cursor.execute(
+                            "SELECT user_id FROM tournament_participants WHERE tournament_id = ?",
+                            (tournament['id'],)
+                        )
+                        
+                        participants = cursor.fetchall()
+                        mentions = ' '.join([f"<@{p['user_id']}>" for p in participants])
+                        
+                        tournament_start_embed = discord.Embed(
+                            title=f"🎮 Турнир начался: {tournament['name']}",
+                            description=f"Турнирная сетка сформирована. Первые матчи созданы!",
+                            color=0x2ECC71  # Green
+                        )
+                        
+                        # Show where to find match ID and other info
+                        tournament_start_embed.add_field(
+                            name="Как найти свой матч?", 
+                            value="Посмотрите свой ID в турнирной сетке ниже. Используйте этот ID для отправки результатов через команду `/tournament-set-result`.", 
+                            inline=False
+                        )
+                        
+                        tournament_start_embed.set_footer(text=f"Турнир ID: {tournament['id']}")
+                        
+                        await channel.send(
+                            f"🏆 **ТУРНИР НАЧАЛСЯ!** Участники: {mentions}", 
+                            embeds=[tournament_start_embed, bracket]
+                        )
+                        
+            except Exception as e:
+                logger.error(f"Error starting tournament {tournament['id']}: {e}")
+                # Don't roll back - we want to keep the 'started' flag true to prevent repeated errors
+                # But also don't mark the tournament as in_progress if it failed
+                cursor.execute(
+                    "UPDATE tournaments SET started = 1 WHERE id = ?",
+                    (tournament['id'],)
+                )
+        
         db.commit()
     
     @check_upcoming_tournaments.before_loop
@@ -698,6 +892,28 @@ class Tournaments(commands.Cog):
         view.add_item(select)
         
         await interaction.response.send_message("Выберите турнир для регистрации команды:", view=view, ephemeral=True)
+        
+    @app_commands.command(
+        name="tournament-bracket",
+        description="Показать турнирную сетку"
+    )
+    @app_commands.describe(
+        tournament_id="ID турнира"
+    )
+    async def tournament_bracket(self, interaction: discord.Interaction, tournament_id: int):
+        await interaction.response.defer(ephemeral=False)  # Откладываем ответ, но показываем его всем
+        
+        try:
+            # Создаем турнирную сетку
+            success, result = generate_tournament_bracket(tournament_id)
+            
+            if success:
+                await interaction.followup.send(embed=result)
+            else:
+                await interaction.followup.send(result, ephemeral=True)
+        except Exception as e:
+            logger.error(f"Error displaying tournament bracket: {e}")
+            await interaction.followup.send("Произошла ошибка при отображении турнирной сетки.", ephemeral=True)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Tournaments(bot))

@@ -54,11 +54,13 @@ def create_tables():
             creator_id INTEGER,
             winner_id INTEGER,
             winner_team_id INTEGER,
-            status TEXT DEFAULT 'pending',  -- "pending" / "approved" / "rejected" / "completed"
+            status TEXT DEFAULT 'pending',  -- "pending" / "approved" / "rejected" / "in_progress" / "completed" / "cancelled"
             approved_by INTEGER,
             rejection_reason TEXT,
+            cancellation_reason TEXT,
             creation_date DATETIME,
             notification_sent INTEGER DEFAULT 0,
+            started INTEGER DEFAULT 0,
             FOREIGN KEY (creator_id) REFERENCES players(user_id),
             FOREIGN KEY (winner_id) REFERENCES players(user_id)
         )
@@ -120,6 +122,7 @@ def create_tables():
             user_id INTEGER,
             tournament_id INTEGER,
             place INTEGER,
+            tournament_type TEXT,  -- "private" / "public"
             FOREIGN KEY (user_id) REFERENCES players(user_id),
             FOREIGN KEY (tournament_id) REFERENCES tournaments(id)
         )

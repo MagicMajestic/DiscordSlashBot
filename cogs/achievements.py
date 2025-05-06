@@ -21,8 +21,9 @@ class Achievements(commands.Cog):
         
         try:
             # Check if achievements table is empty
-            cursor.execute("SELECT COUNT(*) FROM achievements")
-            count = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) as count FROM achievements")
+            result = cursor.fetchone()
+            count = result['count'] if result and 'count' in result else 0
             
             if count == 0:
                 # Add default achievements
@@ -72,8 +73,9 @@ class Achievements(commands.Cog):
         
         try:
             # Check if achievement with same name already exists
-            cursor.execute("SELECT COUNT(*) FROM achievements WHERE name = ?", (name,))
-            if cursor.fetchone()[0] > 0:
+            cursor.execute("SELECT COUNT(*) as count FROM achievements WHERE name = ?", (name,))
+            result = cursor.fetchone()
+            if result and 'count' in result and result['count'] > 0:
                 await interaction.response.send_message("Достижение с таким названием уже существует!", ephemeral=True)
                 return
                 
@@ -121,11 +123,12 @@ class Achievements(commands.Cog):
                 
             # Check if player already has this achievement
             cursor.execute(
-                "SELECT COUNT(*) FROM player_achievements WHERE user_id = ? AND achievement_id = ?",
+                "SELECT COUNT(*) as count FROM player_achievements WHERE user_id = ? AND achievement_id = ?",
                 (user.id, achievement_id)
             )
             
-            if cursor.fetchone()[0] > 0:
+            result = cursor.fetchone()
+            if result and 'count' in result and result['count'] > 0:
                 await interaction.response.send_message(f"Игрок уже имеет это достижение!", ephemeral=True)
                 return
                 
